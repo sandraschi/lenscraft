@@ -1,0 +1,17 @@
+[package]
+name = "lenscraft-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L1 lens engine: photo in, ranked identifications with evidence out (local vision model)"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+image.workspace = true

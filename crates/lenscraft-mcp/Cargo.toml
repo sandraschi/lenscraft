@@ -1,0 +1,19 @@
+[package]
+name = "lenscraft-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L2 lens driver: CLI subcommands and an MCP stdio server over lenscraft-core"
+
+[[bin]]
+name = "lenscraft-mcp"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lenscraft-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true

@@ -1,0 +1,29 @@
+[workspace]
+members = ["crates/lenscraft-core", "crates/lenscraft-mcp"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sandraschi/lenscraft"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+thiserror = "2"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+lenscraft-core = { path = "crates/lenscraft-core" }

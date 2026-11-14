@@ -1,0 +1,8 @@
+/target
+/dist/
+*.bak
+*.bak.*
+*.exe
+.DS_Store
+# Local test photos stay out of git (copyright, size).
+/samples/
