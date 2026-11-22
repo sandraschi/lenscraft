@@ -3,10 +3,14 @@
 //! stdout carries only results (CLI) or JSON-RPC (mcp). Diagnostics go to stderr.
 //! A failed tool call is an error payload with `isError: true`; a failed CLI call
 //! exits 1.
+mod server;
+
 use clap::{Parser, Subcommand};
 use lenscraft_core::{
-    identify, prepare_file, status, IdentifyOptions, IdentifyResult, LensError, OllamaHttp,
-    DEFAULT_MODEL,
+    build_wikidata_pack, explain, generate_relief_ply, ground_work, identify, nearby_venues,
+    prepare_file, save_pack, status, synthesize_sentences, HttpKnowledgeClient, IdentifyMode,
+    IdentifyOptions, IdentifyResult, LengthPreset, LensError, OllamaHttp, OverpassHttp,
+    SpeechMcpHttp, WorldDb, WorldEntry, WorldStatus, DEFAULT_MODEL, DEFAULT_WORLD_DB_PATH, KHM_QID,
 };
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -45,9 +49,100 @@ enum Cmd {
         /// Answer language: en, de, ja, ...
         #[arg(long)]
         language: Option<String>,
+        /// Identification mode: auto, artwork, label
+        #[arg(long, default_value = "auto")]
+        mode: String,
         /// Print JSON instead of text
         #[arg(long)]
         json: bool,
+    },
+    /// Find nearby cultural venues from GPS coordinates
+    Venues {
+        #[arg(long, allow_hyphen_values = true)]
+        lat: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        lon: f64,
+        #[arg(long, default_value_t = 300)]
+        radius_m: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ground an artwork title against Wikidata and Wikipedia
+    Ground {
+        title: String,
+        #[arg(long)]
+        creator: Option<String>,
+        #[arg(long, default_value = "en")]
+        language: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Identify, ground, and produce a 30s/3m/10m museum guide explanation
+    Explain {
+        path: PathBuf,
+        #[arg(long, default_value = "3m")]
+        length: String,
+        #[arg(long)]
+        place: Option<String>,
+        #[arg(long, default_value = "en")]
+        language: String,
+        #[arg(long, default_value = DEFAULT_MODEL)]
+        model: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Synthesize speech WAV chunks via speech-mcp (:10909)
+    Speak {
+        text: String,
+        #[arg(long, default_value = "windows")]
+        provider: String,
+        #[arg(long, default_value = "default")]
+        voice: String,
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Build a museum collection pack from Wikidata (default: KHM Q95569)
+    PackBuild {
+        #[arg(long, default_value = "Kunsthistorisches Museum Wien")]
+        museum: String,
+        #[arg(long, default_value = KHM_QID)]
+        qid: String,
+        #[arg(long, default_value_t = 250)]
+        limit: usize,
+        #[arg(long)]
+        with_signatures: bool,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List ready 3D walk-in worlds in the DB
+    WorldList,
+    /// Generate a local 3D relief PLY from a painting photo and register it in worlds_db.json
+    WorldRelief {
+        #[arg(long)]
+        qid: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long, default_value = "")]
+        creator: String,
+        #[arg(long, default_value = "")]
+        museum: String,
+        #[arg(long)]
+        image: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value = "")]
+        prompt: String,
+    },
+    /// Run the HTTP lens-server + mobile web UI (default port 11265)
+    Serve {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = server::DEFAULT_SERVER_PORT)]
+        port: u16,
     },
     /// Check Ollama and the vision model (exit 1 when not ready)
     Status {
@@ -91,6 +186,153 @@ fn run_identify(path: &Path, opts: &IdentifyOptions) -> Value {
         Ok(r) => to_payload(op, &r),
         Err(e) => err_value(op, &e),
     }
+}
+
+fn run_venues(lat: f64, lon: f64, radius_m: Option<u32>) -> Value {
+    let op = "lens_venues";
+    let t = match OverpassHttp::from_env() {
+        Ok(t) => t,
+        Err(e) => return err_value(op, &e),
+    };
+    match nearby_venues(&t, lat, lon, radius_m) {
+        Ok(v) => to_payload(op, &json!({"venues": v})),
+        Err(e) => err_value(op, &e),
+    }
+}
+
+fn run_ground(title: &str, creator: Option<&str>, language: &str) -> Value {
+    let op = "lens_ground";
+    let t = match HttpKnowledgeClient::new() {
+        Ok(t) => t,
+        Err(e) => return err_value(op, &e),
+    };
+    match ground_work(&t, title, creator, language) {
+        Ok(g) => to_payload(op, &json!({"grounding": g})),
+        Err(e) => err_value(op, &e),
+    }
+}
+
+fn run_explain(
+    path: &Path,
+    length: &str,
+    place: Option<String>,
+    language: &str,
+    model: &str,
+) -> Value {
+    let op = "lens_explain";
+    let preset = match LengthPreset::parse(length) {
+        Ok(p) => p,
+        Err(e) => return err_value(op, &e),
+    };
+    let transport = match OllamaHttp::from_env() {
+        Ok(t) => t,
+        Err(e) => return err_value(op, &e),
+    };
+    let img = match prepare_file(path) {
+        Ok(i) => i,
+        Err(e) => return err_value(op, &e),
+    };
+    let opts = IdentifyOptions {
+        model: model.to_string(),
+        place,
+        language: Some(language.to_string()),
+        ..IdentifyOptions::default()
+    };
+    let id_res = match identify(&transport, &img, &opts) {
+        Ok(r) => r,
+        Err(e) => return err_value(op, &e),
+    };
+    let grounding = HttpKnowledgeClient::new().ok().and_then(|kc| {
+        lenscraft_core::ground_result(&kc, &id_res, language)
+            .ok()
+            .flatten()
+    });
+    match explain(
+        &transport,
+        &id_res,
+        grounding.as_ref(),
+        preset,
+        language,
+        model,
+    ) {
+        Ok(exp) => to_payload(
+            op,
+            &json!({"identify": id_res, "grounding": grounding, "explanation": exp}),
+        ),
+        Err(e) => err_value(op, &e),
+    }
+}
+
+fn run_speak(text: &str, provider: &str, voice: &str, out_dir: Option<&Path>) -> Value {
+    let op = "lens_speak";
+    let speech = match SpeechMcpHttp::from_env() {
+        Ok(s) => s,
+        Err(e) => return err_value(op, &e),
+    };
+    let chunks = match synthesize_sentences(&speech, text, provider, voice) {
+        Ok(c) => c,
+        Err(e) => return err_value(op, &e),
+    };
+    let mut files = Vec::new();
+    if let Some(dir) = out_dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return err_value(op, &LensError::Io(format!("mkdir failed: {e}")));
+        }
+        for (i, (_, wav)) in chunks.iter().enumerate() {
+            let p = dir.join(format!("chunk_{i:03}.wav"));
+            if let Err(e) = std::fs::write(&p, wav) {
+                return err_value(op, &LensError::Io(format!("write wav failed: {e}")));
+            }
+            files.push(p.display().to_string());
+        }
+    }
+    to_payload(
+        op,
+        &json!({
+            "chunks": chunks.len(),
+            "total_wav_bytes": chunks.iter().map(|(_, b)| b.len()).sum::<usize>(),
+            "files": files,
+        }),
+    )
+}
+
+fn run_pack_build(
+    museum: &str,
+    qid: &str,
+    limit: usize,
+    with_signatures: bool,
+    out: &Path,
+) -> Value {
+    let op = "lens_pack";
+    let kc = match HttpKnowledgeClient::new() {
+        Ok(k) => k,
+        Err(e) => return err_value(op, &e),
+    };
+    let mut pack = match build_wikidata_pack(&kc, museum, qid, limit) {
+        Ok(p) => p,
+        Err(e) => return err_value(op, &e),
+    };
+    let hydrated = if with_signatures {
+        match lenscraft_core::hydrate_pack_signatures(&mut pack) {
+            Ok(n) => n,
+            Err(e) => return err_value(op, &e),
+        }
+    } else {
+        0
+    };
+    if let Err(e) = save_pack(&pack, out) {
+        return err_value(op, &e);
+    }
+    to_payload(
+        op,
+        &json!({
+            "museum": pack.museum,
+            "qid": pack.qid,
+            "items": pack.items.len(),
+            "hydrated_signatures": hydrated,
+            "path": out.display().to_string(),
+        }),
+    )
 }
 
 fn run_status(model: &str) -> Value {
@@ -216,6 +458,75 @@ fn tools_list() -> Value {
             "name": "lens_status",
             "description": "Check the lens backend: Ollama reachable, model present, vision capability. ready=false comes with a problem text.",
             "inputSchema": {"type": "object", "properties": {"model": {"type": "string"}}}
+        },
+        {
+            "name": "lens_venues",
+            "description": "Resolve GPS coordinates (lat, lon) to nearby museums, galleries, monuments, and historic buildings via Overpass.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "lat": {"type": "number"},
+                    "lon": {"type": "number"},
+                    "radius_m": {"type": "integer"}
+                },
+                "required": ["lat", "lon"]
+            }
+        },
+        {
+            "name": "lens_ground",
+            "description": "Ground an artwork title and optional creator against Wikidata and Wikipedia.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "creator": {"type": "string"},
+                    "language": {"type": "string"}
+                },
+                "required": ["title"]
+            }
+        },
+        {
+            "name": "lens_explain",
+            "description": "Identify a photo, ground it in Wikidata/Wikipedia, and generate a 30s/3m/10m museum guide with sourced facts marked.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "length": {"type": "string", "description": "30s, 3m, or 10m"},
+                    "place": {"type": "string"},
+                    "language": {"type": "string"},
+                    "model": {"type": "string"}
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "lens_speak",
+            "description": "Synthesize spoken text sentence-by-sentence via speech-mcp (:10909).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "provider": {"type": "string"},
+                    "voice": {"type": "string"},
+                    "out_dir": {"type": "string"}
+                },
+                "required": ["text"]
+            }
+        },
+        {
+            "name": "lens_pack",
+            "description": "Build a museum collection pack from Wikidata SPARQL (default KHM Q95569) and save to JSON.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "museum": {"type": "string"},
+                    "qid": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "out": {"type": "string"}
+                },
+                "required": ["out"]
+            }
         }
     ])
 }
@@ -239,10 +550,22 @@ fn num_arg(args: &Value, key: &str) -> Result<Option<f64>, String> {
     }
 }
 
+fn parse_mode(raw: Option<&str>) -> Result<IdentifyMode, String> {
+    match raw.map(str::trim).map(str::to_lowercase).as_deref() {
+        None | Some("") | Some("auto") => Ok(IdentifyMode::Auto),
+        Some("artwork") => Ok(IdentifyMode::Artwork),
+        Some("label") => Ok(IdentifyMode::Label),
+        Some(other) => Err(format!(
+            "mode must be auto, artwork, or label; got '{other}'"
+        )),
+    }
+}
+
 fn identify_args(args: &Value) -> Result<(String, IdentifyOptions), String> {
     let path = str_arg(args, "path")?
         .filter(|p| !p.trim().is_empty())
         .ok_or_else(|| "path is required".to_string())?;
+    let mode = parse_mode(str_arg(args, "mode")?.as_deref())?;
     Ok((
         path,
         IdentifyOptions {
@@ -252,6 +575,7 @@ fn identify_args(args: &Value) -> Result<(String, IdentifyOptions), String> {
             lat: num_arg(args, "lat")?,
             lon: num_arg(args, "lon")?,
             language: str_arg(args, "language")?,
+            mode,
         },
     ))
 }
@@ -265,6 +589,84 @@ fn call_tool(name: &str, args: &Value) -> Value {
         "lens_status" => match str_arg(args, "model") {
             Ok(m) => run_status(m.as_deref().unwrap_or(DEFAULT_MODEL)),
             Err(e) => invalid("lens_status", e),
+        },
+        "lens_venues" => match (
+            num_arg(args, "lat"),
+            num_arg(args, "lon"),
+            num_arg(args, "radius_m"),
+        ) {
+            (Ok(Some(lat)), Ok(Some(lon)), Ok(rad)) => {
+                run_venues(lat, lon, rad.map(|r| r.max(0.0) as u32))
+            }
+            (Ok(_), Ok(_), Ok(_)) => invalid("lens_venues", "lat and lon are required".to_string()),
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => invalid("lens_venues", e),
+        },
+        "lens_ground" => match (
+            str_arg(args, "title"),
+            str_arg(args, "creator"),
+            str_arg(args, "language"),
+        ) {
+            (Ok(Some(t)), Ok(c), Ok(l)) => {
+                run_ground(&t, c.as_deref(), l.as_deref().unwrap_or("en"))
+            }
+            (Ok(None), _, _) => invalid("lens_ground", "title is required".to_string()),
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => invalid("lens_ground", e),
+        },
+        "lens_explain" => match (
+            str_arg(args, "path"),
+            str_arg(args, "length"),
+            str_arg(args, "place"),
+            str_arg(args, "language"),
+            str_arg(args, "model"),
+        ) {
+            (Ok(Some(p)), Ok(len), Ok(pl), Ok(lang), Ok(m)) => run_explain(
+                Path::new(&p),
+                len.as_deref().unwrap_or("3m"),
+                pl,
+                lang.as_deref().unwrap_or("en"),
+                m.as_deref().unwrap_or(DEFAULT_MODEL),
+            ),
+            (Ok(None), _, _, _, _) => invalid("lens_explain", "path is required".to_string()),
+            (Err(e), _, _, _, _)
+            | (_, Err(e), _, _, _)
+            | (_, _, Err(e), _, _)
+            | (_, _, _, Err(e), _)
+            | (_, _, _, _, Err(e)) => invalid("lens_explain", e),
+        },
+        "lens_speak" => match (
+            str_arg(args, "text"),
+            str_arg(args, "provider"),
+            str_arg(args, "voice"),
+            str_arg(args, "out_dir"),
+        ) {
+            (Ok(Some(t)), Ok(p), Ok(v), Ok(o)) => run_speak(
+                &t,
+                p.as_deref().unwrap_or("windows"),
+                v.as_deref().unwrap_or("default"),
+                o.as_deref().map(Path::new),
+            ),
+            (Ok(None), _, _, _) => invalid("lens_speak", "text is required".to_string()),
+            (Err(e), _, _, _) | (_, Err(e), _, _) | (_, _, Err(e), _) | (_, _, _, Err(e)) => {
+                invalid("lens_speak", e)
+            }
+        },
+        "lens_pack" => match (
+            str_arg(args, "museum"),
+            str_arg(args, "qid"),
+            num_arg(args, "limit"),
+            str_arg(args, "out"),
+        ) {
+            (Ok(m), Ok(q), Ok(l), Ok(Some(o))) => run_pack_build(
+                m.as_deref().unwrap_or("Kunsthistorisches Museum Wien"),
+                q.as_deref().unwrap_or(KHM_QID),
+                l.map(|x| x.max(1.0) as usize).unwrap_or(250),
+                false,
+                Path::new(&o),
+            ),
+            (_, _, _, Ok(None)) => invalid("lens_pack", "out is required".to_string()),
+            (Err(e), _, _, _) | (_, Err(e), _, _) | (_, _, Err(e), _) | (_, _, _, Err(e)) => {
+                invalid("lens_pack", e)
+            }
         },
         other => invalid(other, format!("unknown tool: {other}")),
     };
@@ -351,8 +753,16 @@ fn main() {
             lon,
             model,
             language,
+            mode,
             json,
         } => {
+            let parsed_mode = match parse_mode(Some(&mode)) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
             let opts = IdentifyOptions {
                 model,
                 hint,
@@ -360,6 +770,7 @@ fn main() {
                 lat,
                 lon,
                 language,
+                mode: parsed_mode,
             };
             let v = run_identify(&path, &opts);
             if reports_error(&v) {
@@ -373,6 +784,135 @@ fn main() {
                 0
             }
         }
+        Cmd::Venues {
+            lat,
+            lon,
+            radius_m,
+            json: _,
+        } => {
+            let v = run_venues(lat, lon, Some(radius_m));
+            if reports_error(&v) {
+                emit_error(&v, true)
+            } else {
+                println!("{v:#}");
+                0
+            }
+        }
+        Cmd::Ground {
+            title,
+            creator,
+            language,
+            json: _,
+        } => {
+            let v = run_ground(&title, creator.as_deref(), &language);
+            if reports_error(&v) {
+                emit_error(&v, true)
+            } else {
+                println!("{v:#}");
+                0
+            }
+        }
+        Cmd::Explain {
+            path,
+            length,
+            place,
+            language,
+            model,
+            json: _,
+        } => {
+            let v = run_explain(&path, &length, place, &language, &model);
+            if reports_error(&v) {
+                emit_error(&v, true)
+            } else {
+                println!("{v:#}");
+                0
+            }
+        }
+        Cmd::Speak {
+            text,
+            provider,
+            voice,
+            out_dir,
+            json: _,
+        } => {
+            let v = run_speak(&text, &provider, &voice, out_dir.as_deref());
+            if reports_error(&v) {
+                emit_error(&v, true)
+            } else {
+                println!("{v:#}");
+                0
+            }
+        }
+        Cmd::PackBuild {
+            museum,
+            qid,
+            limit,
+            with_signatures,
+            out,
+            json: _,
+        } => {
+            let v = run_pack_build(&museum, &qid, limit, with_signatures, &out);
+            if reports_error(&v) {
+                emit_error(&v, true)
+            } else {
+                println!("{v:#}");
+                0
+            }
+        }
+        Cmd::WorldList => match WorldDb::load(Path::new(DEFAULT_WORLD_DB_PATH)) {
+            Ok(db) => {
+                println!("{}", serde_json::json!({"worlds": db.list_ready()}));
+                0
+            }
+            Err(e) => emit_error(&err_value("lens_worlds", &e), true),
+        },
+        Cmd::WorldRelief {
+            qid,
+            title,
+            creator,
+            museum,
+            image,
+            out,
+            prompt,
+        } => {
+            let res: Result<Value, LensError> = (|| {
+                let prep = prepare_file(&image)?;
+                let pts = generate_relief_ply(&prep, &out, 0.45)?;
+                let db_path = Path::new(DEFAULT_WORLD_DB_PATH);
+                let mut db = WorldDb::load(db_path)?;
+                let entry = WorldEntry {
+                    qid,
+                    title,
+                    creator,
+                    museum,
+                    kind: lenscraft_core::WorldKind::Painting,
+                    museum_slug: None,
+                    room_id: None,
+                    splat_path: out.display().to_string(),
+                    format: "ply".to_string(),
+                    source: "lenscraft-relief".to_string(),
+                    prompt,
+                    status: WorldStatus::Ready,
+                };
+                db.upsert(entry.clone());
+                db.save(db_path)?;
+                Ok(json!({"world": entry, "vertices": pts}))
+            })();
+            match res {
+                Ok(v) => {
+                    println!("{v:#}");
+                    0
+                }
+                Err(e) => emit_error(&err_value("lens_worlds", &e), true),
+            }
+        }
+        Cmd::Serve { host, port } => match server::run_server(&host, port) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        },
         Cmd::Status { model, json } => {
             let v = run_status(&model);
             if reports_error(&v) {
@@ -436,7 +976,18 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default();
-        assert_eq!(names, vec!["lens_identify", "lens_status"]);
+        assert_eq!(
+            names,
+            vec![
+                "lens_identify",
+                "lens_status",
+                "lens_venues",
+                "lens_ground",
+                "lens_explain",
+                "lens_speak",
+                "lens_pack"
+            ]
+        );
         assert!(names.iter().all(|n| n
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')));

@@ -1,0 +1,21 @@
+[package]
+name = "lenscraft-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L3 pure-Rust egui desktop workstation for LensCraft"
+
+[[bin]]
+name = "lenscraft-app"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lenscraft-core.workspace = true
+eframe.workspace = true
+egui.workspace = true
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
