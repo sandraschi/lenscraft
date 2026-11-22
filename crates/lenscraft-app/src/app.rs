@@ -124,6 +124,45 @@ impl LensApp {
         }
     }
 
+    fn take_webcam_photo(&mut self) {
+        let out_path = std::env::temp_dir().join("lenscraft_webcam.jpg");
+        let _ = std::fs::remove_file(&out_path);
+        // Probe first DirectShow video device via ffmpeg, or launch Windows Camera app.
+        let list_out = std::process::Command::new("ffmpeg")
+            .args(["-list_devices", "true", "-f", "dshow", "-i", "dummy"])
+            .output();
+        let device_name = list_out.ok().and_then(|o| {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            stderr
+                .lines()
+                .find(|l| l.contains("(video)"))
+                .and_then(|l| l.split('"').nth(1))
+                .map(str::to_string)
+        });
+        if let Some(dev) = device_name {
+            let cap = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-f",
+                    "dshow",
+                    "-i",
+                    &format!("video={dev}"),
+                    "-frames:v",
+                    "1",
+                ])
+                .arg(&out_path)
+                .status();
+            if cap.is_ok_and(|s| s.success()) && out_path.exists() {
+                self.load_photo(out_path);
+                return;
+            }
+        }
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "microsoft.windows.camera:"])
+            .spawn();
+        self.status_msg = "No DirectShow webcam captured via ffmpeg; opened Windows Camera (use Open Photo after shooting).".to_string();
+    }
+
     fn load_photo(&mut self, path: PathBuf) {
         match prepare_file(&path) {
             Ok(img) => {
@@ -810,8 +849,11 @@ impl eframe::App for LensApp {
                 .resizable(true)
                 .show(ui, |ui| {
                     ui.heading("Photo & Context");
-                    ui.horizontal(|ui| {
-                        if ui.button("Open Photo...").clicked() {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Take Photo").clicked() {
+                            self.take_webcam_photo();
+                        }
+                        if ui.button("Open Photo... (Ctrl+O)").clicked() {
                             self.open_photo_dialog();
                         }
                         if ui.button("Status").clicked() {
@@ -824,7 +866,17 @@ impl eframe::App for LensApp {
                     ui.separator();
                     ui.label("Model:");
                     ui.text_edit_singleline(&mut self.model);
-                    ui.label("Venue / Place:");
+                    ui.horizontal(|ui| {
+                        ui.label("Venue / Place:");
+                        if ui.small_button("KHM").clicked() {
+                            self.place = "Kunsthistorisches Museum Wien".to_string();
+                            self.lat_text = "48.2038".to_string();
+                            self.lon_text = "16.3618".to_string();
+                        }
+                        if ui.small_button("Museums").clicked() {
+                            self.show_museums = true;
+                        }
+                    });
                     ui.text_edit_singleline(&mut self.place);
                     ui.label("Visitor Hint:");
                     ui.text_edit_singleline(&mut self.hint);
@@ -844,9 +896,12 @@ impl eframe::App for LensApp {
                         ui.selectable_value(&mut self.mode, IdentifyMode::Label, "Label");
                     });
                     ui.separator();
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui.button("Identify (F5)").clicked() {
                             self.run_identify(self.mode);
+                        }
+                        if ui.button("Wall Label (F6)").clicked() {
+                            self.run_identify(IdentifyMode::Label);
                         }
                         if ui.button("Ground (F7)").clicked() {
                             self.run_ground();
@@ -893,39 +948,54 @@ impl eframe::App for LensApp {
                         }
                     });
                     ui.separator();
-                    ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                        if let Some(ref exp) = self.explanation {
-                            for sec in &exp.sections {
-                                let badge = match sec.basis {
-                                    FactBasis::Sourced => "[sourced]",
-                                    FactBasis::Visual => "[visual]",
-                                    FactBasis::Model => "[model]",
-                                };
-                                ui.strong(format!("{badge} {}", sec.heading));
-                                if let Some(ref r) = sec.source_ref {
-                                    ui.small(r);
+                    ScrollArea::vertical()
+                        .id_salt("guide_scroll")
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            if let Some(ref exp) = self.explanation {
+                                for sec in &exp.sections {
+                                    let badge = match sec.basis {
+                                        FactBasis::Sourced => "[sourced]",
+                                        FactBasis::Visual => "[visual]",
+                                        FactBasis::Model => "[model]",
+                                    };
+                                    ui.strong(format!("{badge} {}", sec.heading));
+                                    if let Some(ref r) = sec.source_ref {
+                                        ui.small(r);
+                                    }
+                                    ui.label(&sec.text);
+                                    ui.add_space(6.0);
                                 }
-                                ui.label(&sec.text);
-                                ui.add_space(6.0);
+                            } else {
+                                ui.weak("Run 30s / 3m / 10m guide after identifying a work.");
                             }
-                        } else {
-                            ui.weak("Run 30s / 3m / 10m guide after identifying a work.");
-                        }
-                    });
+                        });
                     ui.separator();
                     ui.label("Ask Follow-up:");
+                    let mut submit_ask = false;
                     ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.qa_input);
+                        let resp = ui.text_edit_singleline(&mut self.qa_input);
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            submit_ask = true;
+                        }
                         if ui.button("Ask").clicked() {
-                            self.run_ask();
+                            submit_ask = true;
                         }
                     });
-                    ScrollArea::vertical().show(ui, |ui| {
-                        for turn in &self.qa_history {
-                            let prefix = if turn.role == "user" { "Q: " } else { "A: " };
-                            ui.label(format!("{prefix}{}", turn.text));
-                        }
-                    });
+                    if submit_ask {
+                        self.run_ask();
+                    }
+                    ScrollArea::vertical()
+                        .id_salt("qa_chat_scroll")
+                        .auto_shrink([false, false])
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for turn in &self.qa_history {
+                                let prefix = if turn.role == "user" { "Q: " } else { "A: " };
+                                ui.label(format!("{prefix}{}", turn.text));
+                                ui.add_space(4.0);
+                            }
+                        });
                 });
         }
 
