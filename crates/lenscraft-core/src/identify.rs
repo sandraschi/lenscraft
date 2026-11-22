@@ -23,6 +23,15 @@ const MAX_EVIDENCE: usize = 6;
 /// falls into a repetition loop writes until the context is full.
 const MAX_OUTPUT_TOKENS: u32 = 1500;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentifyMode {
+    #[default]
+    Auto,
+    Artwork,
+    Label,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct IdentifyOptions {
     /// Ollama model; empty means `DEFAULT_MODEL`.
@@ -41,6 +50,9 @@ pub struct IdentifyOptions {
     /// Language for description and evidence: "en", "de", "ja". Default "en".
     #[serde(default)]
     pub language: Option<String>,
+    /// Identification mode: auto, artwork, or label (label-first OCR + extraction).
+    #[serde(default)]
+    pub mode: IdentifyMode,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -122,6 +134,7 @@ struct Checked {
     place: Option<String>,
     latlon: Option<(f64, f64)>,
     language: String,
+    mode: IdentifyMode,
 }
 
 fn clean(s: &str, max: usize) -> String {
@@ -192,6 +205,7 @@ fn check(opts: &IdentifyOptions) -> Result<Checked, LensError> {
         place,
         latlon,
         language,
+        mode: opts.mode,
     })
 }
 
@@ -203,8 +217,22 @@ Rules:
 4. If you cannot name the specific work, return an empty candidates list. Never invent titles, dates, inventory numbers or attributions.
 5. description: what is visibly there, in two to four sentences.";
 
+const LABEL_SYSTEM_PROMPT: &str = "You read a museum wall label, plaque, or inscription for a visitor standing in front of an artwork or monument. Answer strictly from the text visible in the photo.
+Rules:
+1. label_text: transcribe every readable line of the label or plaque verbatim.
+2. candidates: extract up to 1 primary identification (title, creator, date) directly from the transcribed label. certainty is high when title and creator are legible; medium when partial.
+3. evidence: quote the exact lines from the label that support the title, creator, and date.
+4. If no label text is legible, return an empty candidates list. Never invent titles, dates, or attributions.
+5. description: summarize what the label says in two to three sentences.";
+
 fn user_prompt(c: &Checked) -> String {
-    let mut p = String::from("What is this?");
+    let mut p = match c.mode {
+        IdentifyMode::Label => {
+            String::from("Read this wall label or plaque and identify the work it describes.")
+        }
+        IdentifyMode::Artwork => String::from("Identify this artwork, sculpture, or building."),
+        IdentifyMode::Auto => String::from("What is this?"),
+    };
     if let Some(place) = &c.place {
         p.push_str("\nThe visitor is at: ");
         p.push_str(place);
@@ -253,13 +281,17 @@ pub fn answer_schema() -> Value {
 
 fn build_request(c: &Checked, caps: &[String], img: &PreparedImage) -> Value {
     let b64 = base64::engine::general_purpose::STANDARD.encode(&img.jpeg);
+    let sys = match c.mode {
+        IdentifyMode::Label => LABEL_SYSTEM_PROMPT,
+        IdentifyMode::Auto | IdentifyMode::Artwork => SYSTEM_PROMPT,
+    };
     let mut body = json!({
         "model": c.model,
         "stream": false,
         "format": answer_schema(),
         "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": MAX_OUTPUT_TOKENS},
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": sys},
             {"role": "user", "content": user_prompt(c), "images": [b64]}
         ]
     });
