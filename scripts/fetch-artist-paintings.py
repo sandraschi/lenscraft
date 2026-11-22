@@ -43,18 +43,17 @@ def resolve_artist_qid(name: str) -> tuple[str, str]:
 
 def fetch_artist_works(qid: str, limit: int) -> list[dict]:
     sparql = f"""
-    SELECT ?item ?itemLabel ?collectionLabel ?locationLabel ?genreLabel ?materialLabel ?inception ?image ?sitelinks WHERE {{
+    SELECT ?item ?itemLabel ?collectionLabel ?locationLabel ?genreLabel ?materialLabel ?inception ?image WHERE {{
       ?item wdt:P170 wd:{qid} .
-      ?item wdt:P31/wdt:P279* wd:Q3305213 .
+      ?item wdt:P31 wd:Q3305213 .
       ?item wdt:P18 ?image .
       OPTIONAL {{ ?item wdt:P195 ?collection . }}
       OPTIONAL {{ ?item wdt:P276 ?location . }}
       OPTIONAL {{ ?item wdt:P136 ?genre . }}
       OPTIONAL {{ ?item wdt:P186 ?material . }}
       OPTIONAL {{ ?item wdt:P571 ?inception . }}
-      OPTIONAL {{ ?item wikibase:sitelinks ?sitelinks . }}
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,de,it". }}
-    }} ORDER BY DESC(?sitelinks) LIMIT {limit}
+    }} LIMIT {limit}
     """
     r = requests.get(
         "https://query.wikidata.org/sparql",
