@@ -4,5 +4,7 @@
 *.bak.*
 *.exe
 .DS_Store
-# Local test photos stay out of git (copyright, size).
+# Local test photos and generated museum packs stay out of git.
 /samples/
+/packs/
+/worlds/

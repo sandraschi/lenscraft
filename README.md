@@ -3,8 +3,24 @@
 What am I looking at? Point a camera at a painting, sculpture or building and get ranked
 identifications with the evidence for each, from a vision model running on your own machine.
 
-Status: **0.1.0, lens step L1** (identify engine, CLI, MCP). No app, no speech, no phone
-access yet; those are steps L2 to L8 in giscraft's `docs/TIERED_PLAN.md`, Tier 5.
+Status: **0.3.0, L1-L8 + Museum Platform M1-M5** (`lenscraft-core`, `lenscraft-mcp`, `lenscraft-app` desktop UI, iPhone PWA; L6 in `travelcraft-core/src/lens.rs`; L7 in `giscraft-core/src/bearing_lens.rs`). See [docs/PRD.md](docs/PRD.md), [docs/GUIDE.md](docs/GUIDE.md), [HELP.md](HELP.md), and `D:\Dev\repos\giscraft\docs\TIERED_PLAN.md`.
+
+## Feature Matrix
+
+| Capability | Status | Notes |
+|---|---|---|
+| L1 Photo identify (`lens_identify`) | Implemented | Ollama vision (`gemma4:12b`), EXIF rotate, label verification |
+| L2 Label-first, venues, Wikidata/Wikipedia grounding, 30s/3m/10m guide | Implemented | `lens_venues`, `lens_ground`, `lens_explain`, `--mode label` |
+| L3 Sentence-streamed TTS | Implemented | `speech-mcp` (`:10909`) `/api/v1/tts/wav` + browser fallback |
+| L4 `lens-server` + iPhone PWA | Implemented | Port `11265`, `/manifest.webmanifest`, `/sw.js`, `scripts/tailscale-serve.ps1` |
+| L5 Speech-in, follow-ups, barge-in | Implemented | `speech-mcp` STT + `qa::answer_followup` (accepts corrections) |
+| L6 `travelcraft` SightLens + notebook | Partial | `travelcraft-core/src/lens.rs` supports L2/L5; egui tab wiring open |
+| L7 `giscraft` bearing lens | Implemented | `giscraft-core/src/bearing_lens.rs` ray-cast vs OSM polygons |
+| L8 Collection packs (18 world museums) | Implemented | `DESC(?sitelinks)` SPARQL + `--with-signatures` 24-dim color match |
+| M1 World Museum Directory | Implemented | `museums.rs` (18 Vienna + global flagships), `GET /api/museums` |
+| M2 Multi-Level Floorplans | Implemented | `floorplan.rs` (OSM indoor + KHM/Louvre schematics), `GET /api/museums/{slug}/floorplan` |
+| M3 3D Walk-In DB & Viewer | Implemented | `worlds.rs` (`worlds/worlds_db.json`), relief `.ply` + `splatcraft` `.spz`, in-browser 3D `<canvas>` |
+| L3 Desktop App (`lenscraft-app`) | Implemented | `egui 0.37` Bookend Menu Bar, 10-item Help suite, Command Palette, Floorplan & Light/Dark UI |
 
 ## How it decides
 1. The photo is EXIF-rotated, scaled to at most 1536 px and sent as JPEG to a local Ollama

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/lenscraft-core", "crates/lenscraft-mcp"]
+members = ["crates/lenscraft-core", "crates/lenscraft-mcp", "crates/lenscraft-app"]
 resolver = "2"
 
 [workspace.package]
@@ -24,6 +24,11 @@ serde_json = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 thiserror = "2"
 base64 = "0.22"
-reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "multipart", "rustls-tls"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu"] }
+egui = "0.37"
+rfd = "0.15"
 lenscraft-core = { path = "crates/lenscraft-core" }
