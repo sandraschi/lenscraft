@@ -4,13 +4,15 @@ use egui::{Color32, Context, CornerRadius, Key, Modifiers, ScrollArea, Stroke, S
 use lenscraft_core::{
     answer_followup, build_wikidata_pack, explain, ground_result, identify, load_pack,
     match_collection, nearby_venues, prepare_file, resolve_floorplan, save_pack, search_museums,
-    status, synthesize_sentences, CollectionMatch, CollectionPack, Explanation, FactBasis,
+    split_sentences, status, CollectionMatch, CollectionPack, Explanation, FactBasis,
     FollowupAnswer, GroundingInfo, HttpKnowledgeClient, IdentifyMode, IdentifyOptions,
     IdentifyResult, LengthPreset, ModelStatus, MuseumFloorplan, MuseumSearchHit, OllamaHttp,
     OverpassHttp, PreparedImage, QaTurn, SpeechMcpHttp, VenueCandidate, WorldDb, DEFAULT_MODEL,
     DEFAULT_WORLD_DB_PATH, KHM_QID,
 };
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub struct LensApp {
     dark_mode: bool,
@@ -21,6 +23,9 @@ pub struct LensApp {
     photo_path: Option<PathBuf>,
     recent_files: Vec<PathBuf>,
     prepared: Option<PreparedImage>,
+    photo_texture: Option<egui::TextureHandle>,
+    photo_tex_dirty: bool,
+    speak_cancel: Arc<AtomicBool>,
 
     model: String,
     place: String,
@@ -67,6 +72,9 @@ impl LensApp {
             photo_path: None,
             recent_files: Vec::new(),
             prepared: None,
+            photo_texture: None,
+            photo_tex_dirty: false,
+            speak_cancel: Arc::new(AtomicBool::new(false)),
             model: DEFAULT_MODEL.to_string(),
             place: String::new(),
             hint: String::new(),
@@ -124,6 +132,8 @@ impl LensApp {
                     img.height
                 );
                 self.prepared = Some(img);
+                self.photo_texture = None;
+                self.photo_tex_dirty = true;
                 self.photo_path = Some(path.clone());
                 self.recent_files.retain(|x| x != &path);
                 self.recent_files.insert(0, path);
@@ -284,27 +294,60 @@ impl LensApp {
         let text = self
             .last_answer
             .as_ref()
-            .map(|a| a.answer.as_str())
-            .or_else(|| self.explanation.as_ref().map(|e| e.full_text.as_str()))
-            .or_else(|| self.identify_res.as_ref().map(|r| r.description.as_str()))
-            .unwrap_or("");
+            .map(|a| a.answer.clone())
+            .or_else(|| {
+                self.explanation.as_ref().map(|e| {
+                    e.sections
+                        .iter()
+                        .map(|s| s.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+            })
+            .or_else(|| self.identify_res.as_ref().map(|r| r.description.clone()))
+            .unwrap_or_default();
         if text.trim().is_empty() {
             self.status_msg = "Nothing to speak yet.".to_string();
             return;
         }
-        match SpeechMcpHttp::from_env()
-            .and_then(|s| synthesize_sentences(&s, text, "windows", "default"))
-        {
-            Ok(chunks) => {
-                let bytes: usize = chunks.iter().map(|(_, w)| w.len()).sum();
-                self.status_msg = format!(
-                    "Synthesized {} sentence chunks ({} WAV bytes) via speech-mcp.",
-                    chunks.len(),
-                    bytes
-                );
-            }
-            Err(e) => self.status_msg = format!("Speech failed: {e}"),
+        let sentences = split_sentences(&text);
+        if sentences.is_empty() {
+            return;
         }
+        self.speak_cancel.store(true, Ordering::SeqCst);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.speak_cancel = Arc::clone(&cancel);
+        let count = sentences.len();
+        self.status_msg = format!("Speaking {count} sentences...");
+        std::thread::spawn(move || {
+            let speech = SpeechMcpHttp::from_env().ok();
+            for s in sentences {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                let ok = speech
+                    .as_ref()
+                    .is_some_and(|sp| sp.speak_aloud(&s, "windows", "default").is_ok());
+                if !ok {
+                    let _ = std::process::Command::new("powershell")
+                        .args([
+                            "-NoProfile",
+                            "-Command",
+                            "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak($env:LENS_SPEAK_TEXT)",
+                        ])
+                        .env("LENS_SPEAK_TEXT", &s)
+                        .status();
+                }
+            }
+        });
+    }
+
+    fn stop_speak(&mut self) {
+        self.speak_cancel.store(true, Ordering::SeqCst);
+        if let Ok(sp) = SpeechMcpHttp::from_env() {
+            let _ = sp.stop_aloud();
+        }
+        self.status_msg = "Speech stopped.".to_string();
     }
 
     fn run_ask(&mut self) {
@@ -839,6 +882,9 @@ impl eframe::App for LensApp {
                         if ui.button("Speak").clicked() {
                             self.run_speak();
                         }
+                        if ui.button("Stop").clicked() {
+                            self.stop_speak();
+                        }
                     });
                     ui.separator();
                     ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
@@ -878,9 +924,34 @@ impl eframe::App for LensApp {
         }
 
         if self.show_candidates_pane {
+            if self.photo_tex_dirty {
+                self.photo_tex_dirty = false;
+                if let Some(ref prep) = self.prepared {
+                    if let Ok(dyn_img) = image::load_from_memory(&prep.jpeg) {
+                        let rgba = dyn_img.to_rgba8();
+                        let size = [rgba.width() as usize, rgba.height() as usize];
+                        let color_img =
+                            egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                        self.photo_texture = Some(ctx.load_texture(
+                            "photo_preview",
+                            color_img,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+            }
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.heading("Candidates & Grounding");
                 ScrollArea::vertical().show(ui, |ui| {
+                    if let Some(ref tex) = self.photo_texture {
+                        let avail_w = ui.available_width().max(120.0);
+                        let sz = tex.size_vec2();
+                        let scale = (avail_w / sz.x.max(1.0))
+                            .min(260.0 / sz.y.max(1.0))
+                            .min(1.0);
+                        ui.image((tex.id(), sz * scale));
+                        ui.separator();
+                    }
                     if let Some(ref res) = self.identify_res {
                         ui.strong(format!(
                             "Verdict: {:?} (Basis: {:?}) - {}",

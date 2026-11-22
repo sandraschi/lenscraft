@@ -172,6 +172,49 @@ impl SpeechTransport for SpeechMcpHttp {
     }
 }
 
+impl SpeechMcpHttp {
+    /// Synthesize and play `text` on the host speaker via `POST /api/v1/tts`.
+    pub fn speak_aloud(&self, text: &str, provider: &str, voice_id: &str) -> Result<(), LensError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(LensError::InvalidInput(
+                "tts text must not be empty".to_string(),
+            ));
+        }
+        let url = format!("{}/api/v1/tts", self.base);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({
+                "text": text,
+                "provider": provider,
+                "voice_id": voice_id,
+            }))
+            .send()
+            .map_err(|e| LensError::Offline(format!("speech-mcp unreachable at {url}: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let msg = resp.text().unwrap_or_default();
+            return Err(LensError::Protocol(format!(
+                "speech-mcp {status}: {}",
+                msg.chars().take(200).collect::<String>()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Stop active host playback via `POST /api/v1/stop`.
+    pub fn stop_aloud(&self) -> Result<(), LensError> {
+        let url = format!("{}/api/v1/stop", self.base);
+        let _ = self
+            .client
+            .post(&url)
+            .send()
+            .map_err(|e| LensError::Offline(format!("speech-mcp unreachable at {url}: {e}")))?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpokenChunk {
     pub index: usize,
