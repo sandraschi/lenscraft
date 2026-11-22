@@ -25,8 +25,9 @@ pub use collection::{
 pub use error::LensError;
 pub use explain::{explain, Explanation, ExplanationSection, FactBasis, LengthPreset};
 pub use floorplan::{
-    build_indoor_overpass_ql, curated_floorplan, parse_overpass_floorplan, point_in_polygon,
-    resolve_floorplan, room_at_point, FloorLevel, FloorRoom, MuseumFloorplan,
+    build_indoor_overpass_ql, curated_floorplan, fetch_floorplan_image_bytes,
+    parse_overpass_floorplan, point_in_polygon, resolve_floorplan, room_at_point,
+    search_commons_floorplan, FloorLevel, FloorRoom, MuseumFloorplan,
 };
 pub use grounding::{
     ground_result, ground_work, GroundingInfo, HttpKnowledgeClient, KnowledgeTransport, SourcedFact,

@@ -2,6 +2,7 @@
 //! normalized `[0..1]` plan coordinates, point-in-polygon room hit-testing,
 //! and curated room-to-artwork overlays for flagship museums.
 use crate::error::LensError;
+use crate::grounding::KnowledgeTransport;
 use crate::museums::find_museum;
 use crate::venue::VenueTransport;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,8 @@ pub struct FloorRoom {
 pub struct FloorLevel {
     pub level_id: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
     pub rooms: Vec<FloorRoom>,
 }
 
@@ -200,6 +203,7 @@ pub fn parse_overpass_floorplan(slug: &str, museum_name: &str, raw: &Value) -> M
         .map(|(lvl, rooms)| FloorLevel {
             label: format!("Level {lvl}"),
             level_id: lvl,
+            image_url: None,
             rooms,
         })
         .collect();
@@ -232,18 +236,150 @@ fn rect_room(
     }
 }
 
-/// Curated schematic floorplans for flagship museums when OSM indoor mapping is incomplete.
+fn commons_filepath(file_title: &str) -> String {
+    let clean = file_title
+        .strip_prefix("File:")
+        .unwrap_or(file_title)
+        .trim();
+    let mut enc = String::with_capacity(clean.len());
+    for b in clean.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                enc.push(b as char)
+            }
+            b' ' => enc.push_str("%20"),
+            other => enc.push_str(&format!("%{other:02X}")),
+        }
+    }
+    format!("https://commons.wikimedia.org/wiki/Special:FilePath/{enc}?width=1200")
+}
+
+/// Search Wikimedia Commons for a museum floorplan image (`.svg`, `.png`, `.jpg`).
+pub fn search_commons_floorplan(
+    t: &dyn KnowledgeTransport,
+    museum_name: &str,
+) -> Result<Option<String>, LensError> {
+    let q = format!("{museum_name} floor plan");
+    let mut enc = String::with_capacity(q.len());
+    for b in q.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                enc.push(b as char)
+            }
+            b' ' => enc.push_str("%20"),
+            other => enc.push_str(&format!("%{other:02X}")),
+        }
+    }
+    let url = format!(
+        "https://commons.wikimedia.org/w/api.php?action=query&list=search&srnamespace=6&srsearch={enc}&srlimit=5&format=json"
+    );
+    let v = t.get_json(&url)?;
+    let Some(hits) = v.pointer("/query/search").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    for h in hits {
+        let Some(title) = h.get("title").and_then(Value::as_str) else {
+            continue;
+        };
+        let lc = title.to_lowercase();
+        if lc.ends_with(".svg")
+            || lc.ends_with(".png")
+            || lc.ends_with(".jpg")
+            || lc.ends_with(".jpeg")
+        {
+            return Ok(Some(commons_filepath(title)));
+        }
+    }
+    Ok(None)
+}
+
+/// Download (with local disk cache) a floorplan raster image for rendering in UI.
+pub fn fetch_floorplan_image_bytes(url: &str, cache_path: &Path) -> Result<Vec<u8>, LensError> {
+    if cache_path.exists() {
+        return std::fs::read(cache_path)
+            .map_err(|e| LensError::Io(format!("read cached floorplan failed: {e}")));
+    }
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent("lenscraft/0.3 (local museum lens; https://github.com/sandraschi/lenscraft)")
+        .build()
+        .map_err(|e| LensError::Offline(format!("floorplan client: {e}")))?;
+    let resp = client
+        .get(url)
+        .send()
+        .map_err(|e| LensError::Offline(format!("floorplan download failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(LensError::Protocol(format!(
+            "floorplan image HTTP {}",
+            resp.status()
+        )));
+    }
+    let bytes = resp
+        .bytes()
+        .map_err(|e| LensError::Protocol(format!("floorplan read failed: {e}")))?
+        .to_vec();
+    if let Some(parent) = cache_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    let _ = std::fs::write(cache_path, &bytes);
+    Ok(bytes)
+}
+
+/// Curated schematic floorplans + verified Commons architectural plan images for flagship museums.
 pub fn curated_floorplan(slug: &str) -> Option<MuseumFloorplan> {
     let m = find_museum(slug)?;
     match m.slug {
         "khm" => Some(MuseumFloorplan {
             museum_slug: m.slug.to_string(),
             museum_name: m.name.to_string(),
-            source: "curated-schematic".to_string(),
+            source: "commons+curated".to_string(),
             levels: vec![
+                FloorLevel {
+                    level_id: "1".to_string(),
+                    label: "First Floor (Picture Gallery)".to_string(),
+                    image_url: Some(commons_filepath("1911 Britannica - Imperial Gallery.png")),
+                    rooms: vec![
+                        rect_room(
+                            "khm-x",
+                            "Room X: Pieter Bruegel the Elder",
+                            "X",
+                            (0.08, 0.14, 0.24, 0.30),
+                            &["Q153642", "Q167794"],
+                            Some("Q153642"),
+                        ),
+                        rect_room(
+                            "khm-xi",
+                            "Room XI: Rubens & Van Dyck",
+                            "XI",
+                            (0.36, 0.14, 0.26, 0.30),
+                            &[],
+                            None,
+                        ),
+                        rect_room(
+                            "khm-it",
+                            "Italian Renaissance (Caravaggio, Titian)",
+                            "V",
+                            (0.66, 0.14, 0.26, 0.30),
+                            &[],
+                            None,
+                        ),
+                        rect_room(
+                            "khm-nl",
+                            "Dutch & Flemish Masters (Vermeer)",
+                            "XII",
+                            (0.08, 0.56, 0.84, 0.28),
+                            &[],
+                            None,
+                        ),
+                    ],
+                },
                 FloorLevel {
                     level_id: "0".to_string(),
                     label: "Ground Floor (Kunstkammer & Antiquities)".to_string(),
+                    image_url: None,
                     rooms: vec![
                         rect_room(
                             "khm-ant",
@@ -263,53 +399,16 @@ pub fn curated_floorplan(slug: &str) -> Option<MuseumFloorplan> {
                         ),
                     ],
                 },
-                FloorLevel {
-                    level_id: "1".to_string(),
-                    label: "First Floor (Picture Gallery)".to_string(),
-                    rooms: vec![
-                        rect_room(
-                            "khm-x",
-                            "Room X: Pieter Bruegel the Elder",
-                            "X",
-                            (0.06, 0.12, 0.28, 0.36),
-                            &["Q153642", "Q167794"],
-                            Some("Q153642"),
-                        ),
-                        rect_room(
-                            "khm-xi",
-                            "Room XI: Rubens & Van Dyck",
-                            "XI",
-                            (0.36, 0.12, 0.28, 0.36),
-                            &[],
-                            None,
-                        ),
-                        rect_room(
-                            "khm-it",
-                            "Italian Renaissance (Caravaggio, Titian)",
-                            "V",
-                            (0.66, 0.12, 0.28, 0.36),
-                            &[],
-                            None,
-                        ),
-                        rect_room(
-                            "khm-nl",
-                            "Dutch & Flemish Masters (Vermeer)",
-                            "XII",
-                            (0.06, 0.54, 0.88, 0.34),
-                            &[],
-                            None,
-                        ),
-                    ],
-                },
             ],
         }),
         "louvre" => Some(MuseumFloorplan {
             museum_slug: m.slug.to_string(),
             museum_name: m.name.to_string(),
-            source: "curated-schematic".to_string(),
+            source: "commons+curated".to_string(),
             levels: vec![FloorLevel {
                 level_id: "1".to_string(),
                 label: "Level 1 (Denon, Sully & Richelieu)".to_string(),
+                image_url: Some(commons_filepath("Simple floor plan of the Louvre.svg")),
                 rooms: vec![
                     rect_room(
                         "louvre-711",
@@ -338,6 +437,61 @@ pub fn curated_floorplan(slug: &str) -> Option<MuseumFloorplan> {
                 ],
             }],
         }),
+        "british-museum" => Some(MuseumFloorplan {
+            museum_slug: m.slug.to_string(),
+            museum_name: m.name.to_string(),
+            source: "commons+curated".to_string(),
+            levels: vec![
+                FloorLevel {
+                    level_id: "0".to_string(),
+                    label: "Ground Floor".to_string(),
+                    image_url: Some(commons_filepath(
+                        "Map of Ground Floor, \"British Museum,\" London, 1915.jpg",
+                    )),
+                    rooms: vec![rect_room(
+                        "bm-0",
+                        "Great Court & Sculptures",
+                        "0",
+                        (0.12, 0.15, 0.76, 0.70),
+                        &[],
+                        None,
+                    )],
+                },
+                FloorLevel {
+                    level_id: "1".to_string(),
+                    label: "First Floor".to_string(),
+                    image_url: Some(commons_filepath(
+                        "Map of First Floor, \"British Museum,\" London, 1915.jpg",
+                    )),
+                    rooms: vec![rect_room(
+                        "bm-1",
+                        "Upper Galleries",
+                        "1",
+                        (0.12, 0.15, 0.76, 0.70),
+                        &[],
+                        None,
+                    )],
+                },
+            ],
+        }),
+        "prado" => Some(MuseumFloorplan {
+            museum_slug: m.slug.to_string(),
+            museum_name: m.name.to_string(),
+            source: "commons+curated".to_string(),
+            levels: vec![FloorLevel {
+                level_id: "0".to_string(),
+                label: "Main Galleries".to_string(),
+                image_url: Some(commons_filepath("Planta de El Prado.png")),
+                rooms: vec![rect_room(
+                    "prado-main",
+                    "Villanueva Building Galleries",
+                    "Main",
+                    (0.10, 0.15, 0.80, 0.70),
+                    &[],
+                    None,
+                )],
+            }],
+        }),
         _ => Some(MuseumFloorplan {
             museum_slug: m.slug.to_string(),
             museum_name: m.name.to_string(),
@@ -345,6 +499,7 @@ pub fn curated_floorplan(slug: &str) -> Option<MuseumFloorplan> {
             levels: vec![FloorLevel {
                 level_id: "0".to_string(),
                 label: "Main Galleries".to_string(),
+                image_url: None,
                 rooms: vec![rect_room(
                     "main-hall",
                     "Permanent Collection Highlights",
@@ -358,7 +513,7 @@ pub fn curated_floorplan(slug: &str) -> Option<MuseumFloorplan> {
     }
 }
 
-/// Fetch a museum floorplan from `floorplans/<slug>.json`, or Overpass indoor, or curated schematic.
+/// Fetch a museum floorplan from `floorplans/<slug>.json`, or Overpass indoor, or Commons + curated.
 pub fn resolve_floorplan(
     slug: &str,
     floorplans_dir: &Path,
@@ -373,17 +528,28 @@ pub fn resolve_floorplan(
         return serde_json::from_str(&raw)
             .map_err(|e| LensError::Protocol(format!("parse floorplan failed: {e}")));
     }
-    if let Some(t) = overpass {
-        let ql = build_indoor_overpass_ql(m.lat, m.lon, 180);
-        if let Ok(raw) = t.query(&ql) {
-            let fp = parse_overpass_floorplan(m.slug, m.name, &raw);
-            if !fp.levels.is_empty() {
-                return Ok(fp);
+    let mut fp = curated_floorplan(m.slug)
+        .ok_or_else(|| LensError::Protocol(format!("no floorplan for '{}'", m.slug)))?;
+    if fp.levels.iter().all(|l| l.image_url.is_none()) {
+        if let Some(t) = overpass {
+            let ql = build_indoor_overpass_ql(m.lat, m.lon, 180);
+            if let Ok(raw) = t.query(&ql) {
+                let osm_fp = parse_overpass_floorplan(m.slug, m.name, &raw);
+                if !osm_fp.levels.is_empty() {
+                    return Ok(osm_fp);
+                }
+            }
+        }
+        if let Ok(kc) = crate::grounding::HttpKnowledgeClient::new() {
+            if let Ok(Some(url)) = search_commons_floorplan(&kc, m.name) {
+                if let Some(first) = fp.levels.first_mut() {
+                    first.image_url = Some(url);
+                    fp.source = "commons-search".to_string();
+                }
             }
         }
     }
-    curated_floorplan(m.slug)
-        .ok_or_else(|| LensError::Protocol(format!("no floorplan for '{}'", m.slug)))
+    Ok(fp)
 }
 
 #[cfg(test)]
@@ -396,7 +562,7 @@ mod tests {
         let fp = curated_floorplan("khm")
             .ok_or_else(|| LensError::Protocol("missing khm floorplan".to_string()))?;
         assert_eq!(fp.levels.len(), 2);
-        let first_floor = &fp.levels[1];
+        let first_floor = &fp.levels[0];
         let hit = room_at_point(first_floor, 0.20, 0.28)
             .ok_or_else(|| LensError::Protocol("expected Room X hit".to_string()))?;
         assert_eq!(hit.room_number, "X");

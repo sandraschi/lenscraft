@@ -522,6 +522,35 @@ async fn api_world_splat(AxumPath(qid): AxumPath<String>) -> Response {
     }
 }
 
+async fn api_museum_floorplan_image(
+    AxumPath((slug, level_idx)): AxumPath<(String, usize)>,
+) -> Response {
+    let res = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, LensError> {
+        let overpass = OverpassHttp::from_env().ok();
+        let fp = resolve_floorplan(
+            &slug,
+            std::path::Path::new("floorplans"),
+            overpass
+                .as_ref()
+                .map(|o| o as &dyn lenscraft_core::VenueTransport),
+        )?;
+        let level = fp.levels.get(level_idx).ok_or_else(|| {
+            LensError::InvalidInput(format!("level index {level_idx} out of range"))
+        })?;
+        let url = level.image_url.as_deref().ok_or_else(|| {
+            LensError::InvalidInput(format!("no floorplan image for {slug} level {level_idx}"))
+        })?;
+        let cache_path = std::path::PathBuf::from(format!("floorplans/{slug}_L{level_idx}.img"));
+        lenscraft_core::fetch_floorplan_image_bytes(url, &cache_path)
+    })
+    .await;
+    match res {
+        Ok(Ok(bytes)) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Ok(Err(e)) => err_resp(&e),
+        Err(e) => err_resp(&LensError::Protocol(e.to_string())),
+    }
+}
+
 pub fn build_router() -> Router {
     Router::new()
         .route("/", get(index_html))
@@ -540,6 +569,10 @@ pub fn build_router() -> Router {
         .route("/api/pack/match", post(api_pack_match))
         .route("/api/museums", get(api_museums_list))
         .route("/api/museums/{slug}/floorplan", get(api_museum_floorplan))
+        .route(
+            "/api/museums/{slug}/floorplan/image/{level_idx}",
+            get(api_museum_floorplan_image),
+        )
         .route("/api/worlds", get(api_worlds_list))
         .route("/api/worlds/{qid}", get(api_world_get))
         .route("/api/worlds/{qid}/splat", get(api_world_splat))

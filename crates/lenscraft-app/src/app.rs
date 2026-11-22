@@ -2,13 +2,13 @@
 use crate::help::{HelpTab, HelpWindows, PaletteAction};
 use egui::{Color32, Context, CornerRadius, Key, Modifiers, ScrollArea, Stroke, StrokeKind, Vec2};
 use lenscraft_core::{
-    answer_followup, build_wikidata_pack, explain, ground_result, identify, load_pack,
-    match_collection, nearby_venues, prepare_file, resolve_floorplan, save_pack, search_museums,
-    split_sentences, status, CollectionMatch, CollectionPack, Explanation, FactBasis,
-    FollowupAnswer, GroundingInfo, HttpKnowledgeClient, IdentifyMode, IdentifyOptions,
-    IdentifyResult, LengthPreset, ModelStatus, MuseumFloorplan, MuseumSearchHit, OllamaHttp,
-    OverpassHttp, PreparedImage, QaTurn, SpeechMcpHttp, VenueCandidate, WorldDb, DEFAULT_MODEL,
-    DEFAULT_WORLD_DB_PATH, KHM_QID,
+    answer_followup, build_wikidata_pack, explain, fetch_floorplan_image_bytes, ground_result,
+    identify, load_pack, match_collection, nearby_venues, prepare_file, resolve_floorplan,
+    save_pack, search_museums, split_sentences, status, CollectionMatch, CollectionPack,
+    Explanation, FactBasis, FollowupAnswer, GroundingInfo, HttpKnowledgeClient, IdentifyMode,
+    IdentifyOptions, IdentifyResult, LengthPreset, ModelStatus, MuseumFloorplan, MuseumSearchHit,
+    OllamaHttp, OverpassHttp, PreparedImage, QaTurn, SpeechMcpHttp, VenueCandidate, WorldDb,
+    DEFAULT_MODEL, DEFAULT_WORLD_DB_PATH, KHM_QID,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,6 +57,8 @@ pub struct LensApp {
     museums_list: Vec<MuseumSearchHit>,
     active_floorplan: Option<MuseumFloorplan>,
     active_level_idx: usize,
+    floorplan_texture: Option<egui::TextureHandle>,
+    floorplan_tex_dirty: bool,
     selected_room_name: String,
     selected_room_world: Option<String>,
 }
@@ -100,6 +102,8 @@ impl LensApp {
             museums_list: search_museums(None, None),
             active_floorplan: None,
             active_level_idx: 0,
+            floorplan_texture: None,
+            floorplan_tex_dirty: false,
             selected_room_name: String::new(),
             selected_room_world: None,
         }
@@ -458,6 +462,8 @@ impl LensApp {
             Ok(fp) => {
                 self.place = fp.museum_name.clone();
                 self.active_level_idx = 0;
+                self.floorplan_texture = None;
+                self.floorplan_tex_dirty = true;
                 self.selected_room_name.clear();
                 self.selected_room_world = None;
                 self.status_msg =
@@ -1063,9 +1069,34 @@ impl eframe::App for LensApp {
                                         .clicked()
                                     {
                                         self.active_level_idx = idx;
+                                        self.floorplan_texture = None;
+                                        self.floorplan_tex_dirty = true;
                                     }
                                 }
                             });
+                            if self.floorplan_tex_dirty {
+                                self.floorplan_tex_dirty = false;
+                                if let Some(lv) = fp.levels.get(self.active_level_idx) {
+                                    if let Some(ref url) = lv.image_url {
+                                        let cache = std::path::PathBuf::from(format!(
+                                            "floorplans/{}_L{}.img",
+                                            fp.museum_slug, self.active_level_idx
+                                        ));
+                                        if let Ok(bytes) = fetch_floorplan_image_bytes(url, &cache) {
+                                            if let Ok(dyn_img) = image::load_from_memory(&bytes) {
+                                                let rgba = dyn_img.to_rgba8();
+                                                let sz = [rgba.width() as usize, rgba.height() as usize];
+                                                let ci = egui::ColorImage::from_rgba_unmultiplied(sz, rgba.as_raw());
+                                                self.floorplan_texture = Some(ctx.load_texture(
+                                                    "floorplan_bg",
+                                                    ci,
+                                                    egui::TextureOptions::LINEAR,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             if let Some(lv) = fp.levels.get(self.active_level_idx) {
                                 let (rect, resp) = cols[1].allocate_exact_size(
                                     Vec2::new(360.0, 260.0),
@@ -1073,6 +1104,14 @@ impl eframe::App for LensApp {
                                 );
                                 let p = cols[1].painter();
                                 p.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(18, 24, 36));
+                                if let Some(ref tex) = self.floorplan_texture {
+                                    p.image(
+                                        tex.id(),
+                                        rect,
+                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                        Color32::WHITE,
+                                    );
+                                }
                                 for rm in &lv.rooms {
                                     let pts: Vec<egui::Pos2> = rm
                                         .polygon
