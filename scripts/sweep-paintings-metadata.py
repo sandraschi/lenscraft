@@ -143,7 +143,9 @@ def ollama_provenance_fallback(title: str, author: str, year_hint: str) -> tuple
         return "", "", ""
 
 
-def write_windows_exif(jpg_path: Path, title: str, author: str, comment: str) -> None:
+def write_windows_exif(
+    jpg_path: Path, title: str, author: str, comment: str, tags: list[str] | None = None
+) -> None:
     try:
         exif_dict = piexif.load(str(jpg_path))
     except Exception:
@@ -152,10 +154,14 @@ def write_windows_exif(jpg_path: Path, title: str, author: str, comment: str) ->
     zeroth = exif_dict.setdefault("0th", {})
     zeroth[piexif.ImageIFD.ImageDescription] = title.encode("utf-8", errors="replace")
     zeroth[piexif.ImageIFD.Artist] = author.encode("utf-8", errors="replace")
-    # Windows Explorer Details tab reads XPTitle (0x9C9B), XPAuthor (0x9C9D), XPComment (0x9C9C) in UTF-16LE
+    # Windows Explorer Details tab: XPTitle (0x9C9B), XPComment (0x9C9C), XPAuthor (0x9C9D), XPKeywords/Tags (0x9C9E)
     zeroth[0x9C9B] = (title + "\x00").encode("utf-16le")
-    zeroth[0x9C9D] = (author + "\x00").encode("utf-16le")
     zeroth[0x9C9C] = (comment + "\x00").encode("utf-16le")
+    zeroth[0x9C9D] = (author + "\x00").encode("utf-16le")
+    if tags:
+        clean_tags = "; ".join(t.strip() for t in tags if t and t.strip())
+        if clean_tags:
+            zeroth[0x9C9E] = (clean_tags + "\x00").encode("utf-16le")
 
     exif_bytes = piexif.dump(exif_dict)
     piexif.insert(exif_bytes, str(jpg_path))
@@ -165,8 +171,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="AI metadata sweep for painting JPGs")
     ap.add_argument("folder", type=Path, help="Folder of painting JPGs")
     ap.add_argument("--exe", type=Path, default=DEFAULT_EXE)
-    ap.add_argument("--limit", type=int, default=10, help="Max files per batch (<= 10 recommended)")
-    ap.add_argument("--apply", action="store_true", help="Write EXIF tags (creates .bak first)")
+    ap.add_argument("--limit", type=int, default=10, help="Max files per batch (<= 10)")
+    ap.add_argument("--offset", type=int, default=0, help="Start index into sorted file list")
+    ap.add_argument("--apply", action="store_true", help="Write EXIF tags")
+    ap.add_argument("--no-backup", action="store_true", help="Skip .bak copy (EXIF write is lossless)")
     ap.add_argument("--report", type=Path, default=Path("sweep_report.json"))
     args = ap.parse_args()
 
@@ -175,9 +183,12 @@ def main() -> int:
     if not args.exe.exists():
         raise SystemExit(f"lenscraft-mcp.exe not found at {args.exe}; run cargo build -p lenscraft-mcp")
 
-    files = sorted(
+    all_files = sorted(
         [p for p in args.folder.iterdir() if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg"}]
-    )[: max(1, min(args.limit, 10))]
+    )
+    start = max(0, args.offset)
+    count = max(1, min(args.limit, 10))
+    files = all_files[start : start + count]
 
     results = []
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -218,10 +229,12 @@ def main() -> int:
             parts.append(short_desc)
         comment = " | ".join(parts)
 
+        tags = [t for t in [museum, loc, ground.get("inception"), ident.get("subject_type")] if t and t != "Unknown collection"]
         if args.apply:
-            bak = p.with_name(f"{p.name}.{stamp}.bak")
-            shutil.copy2(p, bak)
-            write_windows_exif(p, final_title, final_author, comment)
+            if not args.no_backup:
+                bak = p.with_name(f"{p.name}.{stamp}.bak")
+                shutil.copy2(p, bak)
+            write_windows_exif(p, final_title, final_author, comment, tags)
 
         row = {
             "file": str(p),
