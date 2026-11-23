@@ -687,7 +687,7 @@ fn handle(msg: &Value) -> Option<Value> {
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     let result = match method {
         "initialize" => Ok(json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2026-07-28",
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "lenscraft", "version": env!("CARGO_PKG_VERSION")}
         })),
@@ -952,7 +952,7 @@ mod tests {
         assert_eq!(
             init.pointer("/result/protocolVersion")
                 .and_then(Value::as_str),
-            Some("2024-11-05")
+            Some("2026-07-28")
         );
         assert!(
             handle(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none()
