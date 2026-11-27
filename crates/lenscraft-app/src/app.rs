@@ -1,6 +1,10 @@
 //! Main egui workstation for LensCraft following CRAFT_MENU_BAR_STANDARD & EGUI_DESKTOP_UI_AND_PARITY.
 use crate::help::{HelpTab, HelpWindows, PaletteAction};
-use egui::{Color32, Context, CornerRadius, Key, Modifiers, ScrollArea, Stroke, StrokeKind, Vec2};
+use crate::theme::{
+    apply_craft_style, card_frame, primary_button, status_dot, theme_toggle_button, verdict_badge,
+    ACCENT_GOLD, INFO_BLUE, OK_GREEN, WARN_AMBER,
+};
+use egui::{Color32, Context, CornerRadius, Key, Modifiers, RichText, ScrollArea, Stroke, Vec2};
 use lenscraft_core::{
     answer_followup, build_wikidata_pack, explain, fetch_floorplan_image_bytes, ground_result,
     identify, load_pack, match_collection, nearby_venues, prepare_file, resolve_floorplan,
@@ -65,7 +69,7 @@ pub struct LensApp {
 
 impl LensApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        apply_theme(&cc.egui_ctx, true);
+        apply_craft_style(&cc.egui_ctx, true);
         Self {
             dark_mode: true,
             show_photo_pane: true,
@@ -639,7 +643,7 @@ impl LensApp {
                         .clicked()
                     {
                         self.dark_mode = true;
-                        apply_theme(ctx, true);
+                        apply_craft_style(ctx, true);
                         ui.close();
                     }
                     if ui
@@ -647,7 +651,7 @@ impl LensApp {
                         .clicked()
                     {
                         self.dark_mode = false;
-                        apply_theme(ctx, false);
+                        apply_craft_style(ctx, false);
                         ui.close();
                     }
                 });
@@ -793,15 +797,21 @@ impl LensApp {
                 }
             });
 
-            // Right-aligned status + zoom pill + vector theme toggle
+            // Right-aligned status dot + zoom pill + vector theme toggle
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme_toggle_button(ui, &mut self.dark_mode) {
-                    apply_theme(ctx, self.dark_mode);
+                    apply_craft_style(ctx, self.dark_mode);
                 }
                 let zoom_pct = (ctx.zoom_factor() * 100.0).round() as i32;
                 if ui.button(format!("{zoom_pct}%")).clicked() {
                     ctx.set_zoom_factor(1.0);
                 }
+                ui.weak(&self.model);
+                status_dot(
+                    ui,
+                    self.backend_status.as_ref().map(|s| s.ready),
+                    "Ollama vision backend status (click Lens > Check Backend Status)",
+                );
                 ui.weak("Safe Rust (0 unsafe)");
             });
         });
@@ -819,7 +829,7 @@ impl LensApp {
             PaletteAction::SpeakGuide => self.run_speak(),
             PaletteAction::ToggleTheme => {
                 self.dark_mode = !self.dark_mode;
-                apply_theme(ctx, self.dark_mode);
+                apply_craft_style(ctx, self.dark_mode);
             }
             PaletteAction::ResetZoom => ctx.set_zoom_factor(1.0),
             PaletteAction::OpenHelp => self.help.open_help(HelpTab::GetStarted),
@@ -845,80 +855,101 @@ impl eframe::App for LensApp {
 
         if self.show_photo_pane {
             egui::Panel::left("photo_context")
-                .default_size(310.0)
+                .default_size(320.0)
                 .resizable(true)
                 .show(ui, |ui| {
                     ui.heading("Photo & Context");
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Take Photo").clicked() {
-                            self.take_webcam_photo();
-                        }
-                        if ui.button("Open Photo... (Ctrl+O)").clicked() {
-                            self.open_photo_dialog();
-                        }
-                        if ui.button("Status").clicked() {
-                            self.check_status();
-                        }
-                    });
-                    if let Some(ref p) = self.photo_path {
-                        ui.small(p.display().to_string());
-                    }
-                    ui.separator();
-                    ui.label("Model:");
-                    ui.text_edit_singleline(&mut self.model);
-                    ui.horizontal(|ui| {
-                        ui.label("Venue / Place:");
-                        if ui.small_button("KHM").clicked() {
-                            self.place = "Kunsthistorisches Museum Wien".to_string();
-                            self.lat_text = "48.2038".to_string();
-                            self.lon_text = "16.3618".to_string();
-                        }
-                        if ui.small_button("Museums").clicked() {
-                            self.show_museums = true;
+                    ui.add_space(4.0);
+                    card_frame(ui, ACCENT_GOLD, |ui| {
+                        ui.label(RichText::new("Capture & Input").strong());
+                        ui.horizontal_wrapped(|ui| {
+                            if primary_button(ui, "Take Photo").clicked() {
+                                self.take_webcam_photo();
+                            }
+                            if ui.button("Open Photo... (Ctrl+O)").clicked() {
+                                self.open_photo_dialog();
+                            }
+                            if ui.button("Status").clicked() {
+                                self.check_status();
+                            }
+                        });
+                        if let Some(ref p) = self.photo_path {
+                            ui.small(p.display().to_string());
                         }
                     });
-                    ui.text_edit_singleline(&mut self.place);
-                    ui.label("Visitor Hint:");
-                    ui.text_edit_singleline(&mut self.hint);
-                    ui.horizontal(|ui| {
-                        ui.label("Lat:");
-                        ui.add(egui::TextEdit::singleline(&mut self.lat_text).desired_width(80.0));
-                        ui.label("Lon:");
-                        ui.add(egui::TextEdit::singleline(&mut self.lon_text).desired_width(80.0));
-                        if ui.button("Venues").clicked() {
-                            self.run_venues();
-                        }
+                    ui.add_space(6.0);
+                    card_frame(ui, INFO_BLUE, |ui| {
+                        ui.label(RichText::new("Context & Venue").strong());
+                        ui.label("Model:");
+                        ui.text_edit_singleline(&mut self.model);
+                        ui.horizontal(|ui| {
+                            ui.label("Venue / Place:");
+                            if ui.small_button("KHM").clicked() {
+                                self.place = "Kunsthistorisches Museum Wien".to_string();
+                                self.lat_text = "48.2038".to_string();
+                                self.lon_text = "16.3618".to_string();
+                            }
+                            if ui.small_button("Museums").clicked() {
+                                self.show_museums = true;
+                            }
+                        });
+                        ui.text_edit_singleline(&mut self.place);
+                        ui.label("Visitor Hint:");
+                        ui.text_edit_singleline(&mut self.hint);
+                        ui.horizontal(|ui| {
+                            ui.label("Lat:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.lat_text).desired_width(75.0),
+                            );
+                            ui.label("Lon:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.lon_text).desired_width(75.0),
+                            );
+                            if ui.button("Venues").clicked() {
+                                self.run_venues();
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Lang:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.language).desired_width(48.0),
+                            );
+                            ui.selectable_value(&mut self.mode, IdentifyMode::Auto, "Auto");
+                            ui.selectable_value(&mut self.mode, IdentifyMode::Label, "Label");
+                        });
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Lang:");
-                        ui.add(egui::TextEdit::singleline(&mut self.language).desired_width(50.0));
-                        ui.selectable_value(&mut self.mode, IdentifyMode::Auto, "Auto");
-                        ui.selectable_value(&mut self.mode, IdentifyMode::Label, "Label");
-                    });
-                    ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Identify (F5)").clicked() {
-                            self.run_identify(self.mode);
-                        }
-                        if ui.button("Wall Label (F6)").clicked() {
-                            self.run_identify(IdentifyMode::Label);
-                        }
-                        if ui.button("Ground (F7)").clicked() {
-                            self.run_ground();
-                        }
+                    ui.add_space(6.0);
+                    card_frame(ui, OK_GREEN, |ui| {
+                        ui.label(RichText::new("Run Lens").strong());
+                        ui.horizontal_wrapped(|ui| {
+                            if primary_button(ui, "Identify (F5)").clicked() {
+                                self.run_identify(self.mode);
+                            }
+                            if ui.button("Wall Label (F6)").clicked() {
+                                self.run_identify(IdentifyMode::Label);
+                            }
+                            if ui.button("Ground (F7)").clicked() {
+                                self.run_ground();
+                            }
+                        });
                     });
                     if !self.venues.is_empty() {
-                        ui.separator();
-                        ui.label("Nearby Venues:");
-                        ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-                            for v in self.venues.clone() {
-                                if ui
-                                    .button(format!("{} ({:.0} m)", v.name, v.distance_m))
-                                    .clicked()
-                                {
-                                    self.place = v.name;
-                                }
-                            }
+                        ui.add_space(6.0);
+                        card_frame(ui, INFO_BLUE, |ui| {
+                            ui.label(RichText::new("Nearby Venues").strong());
+                            ScrollArea::vertical()
+                                .id_salt("venues_scroll")
+                                .max_height(130.0)
+                                .show(ui, |ui| {
+                                    for v in self.venues.clone() {
+                                        if ui
+                                            .button(format!("{} ({:.0} m)", v.name, v.distance_m))
+                                            .clicked()
+                                        {
+                                            self.place = v.name;
+                                        }
+                                    }
+                                });
                         });
                     }
                 });
@@ -926,76 +957,93 @@ impl eframe::App for LensApp {
 
         if self.show_guide_pane {
             egui::Panel::right("guide_qa")
-                .default_size(390.0)
+                .default_size(400.0)
                 .resizable(true)
                 .show(ui, |ui| {
                     ui.heading("Guide & Follow-up Q&A");
-                    ui.horizontal(|ui| {
-                        if ui.button("30s").clicked() {
-                            self.run_explain(LengthPreset::Brief30s);
-                        }
-                        if ui.button("3m (F8)").clicked() {
-                            self.run_explain(LengthPreset::Standard3m);
-                        }
-                        if ui.button("10m").clicked() {
-                            self.run_explain(LengthPreset::Deep10m);
-                        }
-                        if ui.button("Speak").clicked() {
-                            self.run_speak();
-                        }
-                        if ui.button("Stop").clicked() {
-                            self.stop_speak();
-                        }
-                    });
-                    ui.separator();
-                    ScrollArea::vertical()
-                        .id_salt("guide_scroll")
-                        .max_height(300.0)
-                        .show(ui, |ui| {
-                            if let Some(ref exp) = self.explanation {
-                                for sec in &exp.sections {
-                                    let badge = match sec.basis {
-                                        FactBasis::Sourced => "[sourced]",
-                                        FactBasis::Visual => "[visual]",
-                                        FactBasis::Model => "[model]",
-                                    };
-                                    ui.strong(format!("{badge} {}", sec.heading));
-                                    if let Some(ref r) = sec.source_ref {
-                                        ui.small(r);
+                    ui.add_space(4.0);
+                    card_frame(ui, ACCENT_GOLD, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("30s").clicked() {
+                                self.run_explain(LengthPreset::Brief30s);
+                            }
+                            if primary_button(ui, "3m Guide (F8)").clicked() {
+                                self.run_explain(LengthPreset::Standard3m);
+                            }
+                            if ui.button("10m").clicked() {
+                                self.run_explain(LengthPreset::Deep10m);
+                            }
+                            if ui.button("Speak").clicked() {
+                                self.run_speak();
+                            }
+                            if ui.button("Stop").clicked() {
+                                self.stop_speak();
+                            }
+                        });
+                        ui.separator();
+                        ScrollArea::vertical()
+                            .id_salt("guide_scroll")
+                            .max_height(280.0)
+                            .show(ui, |ui| {
+                                if let Some(ref exp) = self.explanation {
+                                    for sec in &exp.sections {
+                                        let (badge, b_col) = match sec.basis {
+                                            FactBasis::Sourced => ("[sourced]", OK_GREEN),
+                                            FactBasis::Visual => ("[visual]", INFO_BLUE),
+                                            FactBasis::Model => ("[model]", WARN_AMBER),
+                                        };
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                RichText::new(badge).small().strong().color(b_col),
+                                            );
+                                            ui.strong(&sec.heading);
+                                        });
+                                        if let Some(ref r) = sec.source_ref {
+                                            ui.small(r);
+                                        }
+                                        ui.label(&sec.text);
+                                        ui.add_space(6.0);
                                     }
-                                    ui.label(&sec.text);
-                                    ui.add_space(6.0);
+                                } else {
+                                    ui.weak("Run 30s / 3m / 10m guide after identifying a work.");
                                 }
-                            } else {
-                                ui.weak("Run 30s / 3m / 10m guide after identifying a work.");
-                            }
-                        });
-                    ui.separator();
-                    ui.label("Ask Follow-up:");
-                    let mut submit_ask = false;
-                    ui.horizontal(|ui| {
-                        let resp = ui.text_edit_singleline(&mut self.qa_input);
-                        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                            submit_ask = true;
-                        }
-                        if ui.button("Ask").clicked() {
-                            submit_ask = true;
-                        }
+                            });
                     });
-                    if submit_ask {
-                        self.run_ask();
-                    }
-                    ScrollArea::vertical()
-                        .id_salt("qa_chat_scroll")
-                        .auto_shrink([false, false])
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            for turn in &self.qa_history {
-                                let prefix = if turn.role == "user" { "Q: " } else { "A: " };
-                                ui.label(format!("{prefix}{}", turn.text));
-                                ui.add_space(4.0);
+                    ui.add_space(6.0);
+                    card_frame(ui, INFO_BLUE, |ui| {
+                        ui.label(RichText::new("Follow-up Q&A").strong());
+                        let mut submit_ask = false;
+                        ui.horizontal(|ui| {
+                            let resp = ui.text_edit_singleline(&mut self.qa_input);
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                submit_ask = true;
+                            }
+                            if primary_button(ui, "Ask").clicked() {
+                                submit_ask = true;
                             }
                         });
+                        if submit_ask {
+                            self.run_ask();
+                        }
+                        ScrollArea::vertical()
+                            .id_salt("qa_chat_scroll")
+                            .auto_shrink([false, false])
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for turn in &self.qa_history {
+                                    if turn.role == "user" {
+                                        ui.label(
+                                            RichText::new(format!("Q: {}", turn.text))
+                                                .strong()
+                                                .color(ACCENT_GOLD),
+                                        );
+                                    } else {
+                                        ui.label(format!("A: {}", turn.text));
+                                    }
+                                    ui.add_space(4.0);
+                                }
+                            });
+                    });
                 });
         }
 
@@ -1018,44 +1066,54 @@ impl eframe::App for LensApp {
             }
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.heading("Candidates & Grounding");
-                ScrollArea::vertical().show(ui, |ui| {
-                    if let Some(ref tex) = self.photo_texture {
-                        let avail_w = ui.available_width().max(120.0);
-                        let sz = tex.size_vec2();
-                        let scale = (avail_w / sz.x.max(1.0))
-                            .min(260.0 / sz.y.max(1.0))
-                            .min(1.0);
-                        ui.image((tex.id(), sz * scale));
-                        ui.separator();
-                    }
-                    if let Some(ref res) = self.identify_res {
-                        ui.strong(format!(
-                            "Verdict: {:?} (Basis: {:?}) - {}",
-                            res.verdict, res.basis, res.subject_type
-                        ));
-                        ui.label(&res.description);
-                        if !res.label_text.is_empty() {
-                            ui.separator();
-                            ui.strong("Transcribed Wall Label:");
-                            ui.monospace(&res.label_text);
+                ui.add_space(4.0);
+                ScrollArea::vertical()
+                    .id_salt("candidates_scroll")
+                    .show(ui, |ui| {
+                        if let Some(ref tex) = self.photo_texture {
+                            card_frame(ui, ACCENT_GOLD, |ui| {
+                                let avail_w = ui.available_width().max(120.0);
+                                let sz = tex.size_vec2();
+                                let scale = (avail_w / sz.x.max(1.0))
+                                    .min(260.0 / sz.y.max(1.0))
+                                    .min(1.0);
+                                ui.image((tex.id(), sz * scale));
+                            });
+                            ui.add_space(6.0);
                         }
-                        ui.separator();
-                        for (i, c) in res.candidates.iter().enumerate() {
-                            ui.strong(format!(
-                                "{}. {} | {} | {} [{:?}]",
-                                i + 1,
-                                c.title,
-                                c.creator,
-                                c.date,
-                                c.certainty
-                            ));
-                            for e in &c.evidence {
-                                ui.label(format!("  - {e}"));
-                            }
+                        if let Some(ref res) = self.identify_res {
+                            card_frame(ui, OK_GREEN, |ui| {
+                                verdict_badge(ui, res.verdict, res.basis);
+                                ui.small(format!("subject: {} ({} ms)", res.subject_type, res.elapsed_ms));
+                                ui.add_space(4.0);
+                                ui.label(&res.description);
+                                if !res.label_text.is_empty() {
+                                    ui.separator();
+                                    ui.strong("Transcribed Wall Label:");
+                                    ui.monospace(&res.label_text);
+                                }
+                                ui.separator();
+                                for (i, c) in res.candidates.iter().enumerate() {
+                                    ui.strong(format!(
+                                        "{}. {} | {} | {} [{:?}]",
+                                        i + 1,
+                                        c.title,
+                                        c.creator,
+                                        c.date,
+                                        c.certainty
+                                    ));
+                                    for e in &c.evidence {
+                                        ui.label(format!("  - {e}"));
+                                    }
+                                }
+                            });
+                            ui.add_space(6.0);
+                        } else {
+                            card_frame(ui, INFO_BLUE, |ui| {
+                                ui.weak("No identification yet. Open a photo (Ctrl+O) or Take Photo, then press F5.");
+                            });
+                            ui.add_space(6.0);
                         }
-                    } else {
-                        ui.weak("No identification yet. Open a photo (Ctrl+O) and press F5.");
-                    }
 
                     if let Some(ref g) = self.grounding {
                         ui.separator();
@@ -1090,7 +1148,7 @@ impl eframe::App for LensApp {
                 .show(&ctx, |ui| {
                     ui.checkbox(&mut self.dark_mode, "Dark Mode");
                     if ui.button("Apply Theme").clicked() {
-                        apply_theme(&ctx, self.dark_mode);
+                        apply_craft_style(&ctx, self.dark_mode);
                     }
                     ui.label("Default Ollama Model:");
                     ui.text_edit_singleline(&mut self.model);
@@ -1275,70 +1333,15 @@ fn handle_zoom(ctx: &Context) {
     }
 }
 
-fn apply_theme(ctx: &Context, dark: bool) {
-    let mut v = if dark {
-        let mut d = egui::Visuals::dark();
-        d.panel_fill = Color32::from_rgb(10, 13, 18);
-        d.window_fill = Color32::from_rgb(16, 22, 34);
-        d.override_text_color = Some(Color32::from_rgb(245, 247, 250));
-        d
-    } else {
-        let mut l = egui::Visuals::light();
-        l.panel_fill = Color32::from_rgb(248, 249, 252);
-        l.window_fill = Color32::from_rgb(255, 255, 255);
-        // High-contrast dark ink on light mode (never light grey on white)
-        l.override_text_color = Some(Color32::from_rgb(16, 20, 28));
-        l
-    };
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(56, 72, 102));
-    ctx.set_visuals(v);
-}
-
-fn theme_toggle_button(ui: &mut egui::Ui, dark_mode: &mut bool) -> bool {
-    let size = Vec2::new(26.0, 22.0);
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact(&resp);
-        ui.painter().rect(
-            rect,
-            CornerRadius::same(5),
-            visuals.bg_fill,
-            visuals.bg_stroke,
-            StrokeKind::Inside,
-        );
-        let c = rect.center();
-        if *dark_mode {
-            // Vector Sun
-            ui.painter()
-                .circle_filled(c, 4.0, Color32::from_rgb(250, 204, 21));
-            for k in 0..8 {
-                let a = (k as f32) * std::f32::consts::TAU / 8.0;
-                let p1 = c + Vec2::new(a.cos(), a.sin()) * 6.0;
-                let p2 = c + Vec2::new(a.cos(), a.sin()) * 8.5;
-                ui.painter()
-                    .line_segment([p1, p2], Stroke::new(1.3, Color32::from_rgb(250, 204, 21)));
-            }
-        } else {
-            // Vector Crescent Moon
-            ui.painter()
-                .circle_filled(c, 5.5, Color32::from_rgb(30, 41, 59));
-            ui.painter()
-                .circle_filled(c + Vec2::new(2.6, -1.8), 4.5, visuals.bg_fill);
-        }
-    }
-    if resp.clicked() {
-        *dark_mode = !*dark_mode;
-        true
-    } else {
-        false
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn glyph_allowlist() {
-        for src in [include_str!("app.rs"), include_str!("help.rs")] {
+        for src in [
+            include_str!("app.rs"),
+            include_str!("help.rs"),
+            include_str!("theme.rs"),
+        ] {
             for ch in src.chars() {
                 assert!(
                     ch.is_ascii()

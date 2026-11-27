@@ -1,6 +1,7 @@
 //! lenscraft-app: L3 pure-Rust egui desktop workstation over lenscraft-core.
 mod app;
 mod help;
+mod theme;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
